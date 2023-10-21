@@ -7,7 +7,7 @@ package graph
 import (
 	"context"
 	"errors"
-	"slices"
+	"log"
 	"sort"
 	"time"
 
@@ -31,30 +31,31 @@ func (r *mutationResolver) CreateTodo(ctx context.Context, input model.NewTodo) 
 		TodoID:    id.String(),
 		Text:      input.Text,
 	}
-	r.todos = append(r.todos, todo)
-	r.histories = append(r.histories, history)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.addTodo(todo)
+	r.addHistory(history)
 	return todo, nil
 }
 
 // DoneTodo is the resolver for the doneTodo field.
 func (r *mutationResolver) DoneTodo(ctx context.Context, input model.DoneTodo) (*model.Todo, error) {
-	index := slices.IndexFunc(r.todos, func(t *model.Todo) bool {
-		return t.ID == input.TodoID
-	})
-	if index == -1 {
-		return nil, errors.New("not found")
-	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	var todo *model.Todo = r.todos[index]
+	todo, err := r.findTodo(input.TodoID)
+	if err != nil {
+		return nil, err
+	}
 
 	if todo.Done {
 		return nil, errors.New("already done")
 	}
 	todo.Done = true
 
-	r.histories = append(r.histories, &model.History{
+	r.updateTodo(todo)
+	r.addHistory(&model.History{
 		TodoID:    todo.ID,
 		Text:      todo.Text,
 		Done:      todo.Done,
@@ -66,20 +67,21 @@ func (r *mutationResolver) DoneTodo(ctx context.Context, input model.DoneTodo) (
 
 // ToggleTodo is the resolver for the toggleTodo field.
 func (r *mutationResolver) ToggleTodo(ctx context.Context, input model.ToggleTodo) (*model.Todo, error) {
-	index := slices.IndexFunc(r.todos, func(t *model.Todo) bool {
-		return t.ID == input.TodoID
-	})
-	if index == -1 {
-		return nil, errors.New("not found")
-	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	var todo *model.Todo = r.todos[index]
+	todo, err := r.findTodo(input.TodoID)
+	if err != nil {
+		return nil, err
+	}
 
 	todo.Done = !todo.Done
 
-	r.histories = append(r.histories, &model.History{
+	if err := r.updateTodo(todo); err != nil {
+		return nil, err
+	}
+
+	r.addHistory(&model.History{
 		TodoID:    todo.ID,
 		Text:      todo.Text,
 		Done:      todo.Done,
@@ -93,11 +95,18 @@ func (r *mutationResolver) ToggleTodo(ctx context.Context, input model.ToggleTod
 func (r *queryResolver) Todos(ctx context.Context) ([]*model.Todo, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return slices.Clone(r.todos), nil
+	log.Println("call Resolver Todos")
+
+	res := make([]*model.Todo, 0, len(r.todos))
+	for _, t := range r.todos {
+		res = append(res, r.copyTodo(t))
+	}
+	return res, nil
 }
 
 // User is the resolver for the user field.
 func (r *todoResolver) User(ctx context.Context, obj *model.Todo) (*model.User, error) {
+	log.Println("call Resolver User")
 	return &model.User{ID: obj.UserID, Name: "user " + obj.UserID}, nil
 }
 
@@ -105,15 +114,11 @@ func (r *todoResolver) User(ctx context.Context, obj *model.Todo) (*model.User, 
 func (r *todoResolver) Histories(ctx context.Context, obj *model.Todo) ([]*model.History, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	log.Println("call Resolver Histories")
 	histories := []*model.History{}
 	for _, h := range r.histories {
 		if h.TodoID == obj.ID {
-			histories = append(histories, &model.History{
-				TodoID:    h.TodoID,
-				Text:      h.Text,
-				Done:      h.Done,
-				CreatedAt: h.CreatedAt,
-			})
+			histories = append(histories, r.copyHistory(h))
 		}
 	}
 	sort.SliceStable(histories, func(i, j int) bool {
